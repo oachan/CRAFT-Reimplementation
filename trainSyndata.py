@@ -55,7 +55,7 @@ parser.add_argument('--resume', default=None, type=str,
                     help='Checkpoint state_dict file to resume training from')
 parser.add_argument('--batch_size', default=128, type = int,
                     help='batch size of training')
-#parser.add_argument('--cdua', default=True, type=str2bool,
+#parser.add_argument('--cuda', default=True, type=str2bool,
                     #help='Use CUDA to train model')
 parser.add_argument('--lr', '--learning-rate', default=3.2768e-5, type=float,
                     help='initial learning rate')

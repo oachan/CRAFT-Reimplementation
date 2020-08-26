@@ -15,11 +15,12 @@ import random
 import h5py
 import re
 # import water
+
+from data_loader import ICDAR2015, Synth80k, ICDAR2013, PRL5fold
+
 from test import test
 
-
 from math import exp
-from data_loader import ICDAR2015, Synth80k, ICDAR2013
 
 ###import file#######
 # from augmentation import random_rot, crop_img_bboxes
@@ -27,12 +28,8 @@ from data_loader import ICDAR2015, Synth80k, ICDAR2013
 # from generateheatmap import add_character, generate_target, add_affinity, generate_affinity, sort_box, real_affinity, generate_affinity_box
 from mseloss import Maploss
 
-
-
 from collections import OrderedDict
 from eval.script import getresult
-
-
 
 from PIL import Image
 from torchvision.transforms import transforms
@@ -43,20 +40,15 @@ from multiprocessing import Pool
 #3.2768e-5
 random.seed(42)
 
-# class SynAnnotationTransform(object):
-#     def __init__(self):
-#         pass
-#     def __call__(self, gt):
-#         image_name = gt['imnames'][0]
 parser = argparse.ArgumentParser(description='CRAFT reimplementation')
 
 
 parser.add_argument('--resume', default=None, type=str,
                     help='Checkpoint state_dict file to resume training from')
-parser.add_argument('--batch_size', default=128, type = int,
+parser.add_argument('--batch_size', default=12, type = int,
                     help='batch size of training')
-#parser.add_argument('--cuda', default=True, type=str2bool,
-                    #help='Use CUDA to train model')
+parser.add_argument('--cuda', default=True, type=bool,
+                    help='Use CUDA to train model')
 parser.add_argument('--lr', '--learning-rate', default=3.2768e-5, type=float,
                     help='initial learning rate')
 parser.add_argument('--momentum', default=0.9, type=float,
@@ -65,16 +57,17 @@ parser.add_argument('--weight_decay', default=5e-4, type=float,
                     help='Weight decay for SGD')
 parser.add_argument('--gamma', default=0.1, type=float,
                     help='Gamma update for SGD')
-parser.add_argument('--num_workers', default=32, type=int,
+parser.add_argument('--num_workers', default=8, type=int,
                     help='Number of workers used in dataloading')
+# parser.add_argument('--fold_number', default=3, type=int,
+#                     help='determine which fold to be trained on')
+parser.add_argument('--start_epoch', default=2, type=int,
+                    help='the number of epoches you start')
 
 
 args = parser.parse_args()
 
-
-
-
-
+os.environ["CUDA_VISIBLE_DEVICES"] = "0,1,2,3"
 
 def copyStateDict(state_dict):
     if list(state_dict.keys())[0].startswith("module"):
@@ -86,6 +79,7 @@ def copyStateDict(state_dict):
         name = ".".join(k.split(".")[start_idx:])
         new_state_dict[name] = v
     return new_state_dict
+
 
 def adjust_learning_rate(optimizer, gamma, step):
     """Sets the learning rate to the initial LR decayed by 10 at every
@@ -101,6 +95,18 @@ def adjust_learning_rate(optimizer, gamma, step):
 
 if __name__ == '__main__':
 
+    # device = torch.device("cuda:2,3")
+
+    net = CRAFT()
+    net.load_state_dict(copyStateDict(torch.load('./epoch_weights/SciTSR/SciTSR_epoch_1_batch_950.pth')))
+    net = net.cuda()
+
+    if args.cuda:
+        net = torch.nn.DataParallel(net,device_ids=[0,1,2,3]).cuda()
+
+    net.train()
+    cudnn.benchmark = False
+
     dataloader = Synth80k('./data/CRAFT-pytorch/SynthText/', target_size = 768)
     train_loader = torch.utils.data.DataLoader(
         dataloader,
@@ -110,19 +116,9 @@ if __name__ == '__main__':
         drop_last=True,
         pin_memory=True)
     batch_syn = iter(train_loader)
-    
-    net = CRAFT()
 
-    net.load_state_dict(copyStateDict(torch.load('./data/CRAFT-pytorch/Syndata_IC13_17.pth')))
-    
-    net = net.cuda()
-
-
-
-    net = torch.nn.DataParallel(net,device_ids=[0,1,2,3]).cuda()
-    cudnn.benchmark = True
-    net.train()
-    realdata = ICDAR2015(net, './data/CRAFT-pytorch/icdar2015/train/', target_size=768)
+    # realdata = PRL5fold(net, './data/PRL_5fold/fold%d/train/' % (args.fold_number), target_size = 768, viz = False)
+    realdata = PRL5fold(net, './data/SciTSR/train/', target_size = 768, viz = False)
     real_data_loader = torch.utils.data.DataLoader(
         realdata,
         batch_size=10,
@@ -130,37 +126,36 @@ if __name__ == '__main__':
         num_workers=0,
         drop_last=True,
         pin_memory=True)
-
+    
+    net.train()
 
     optimizer = optim.Adam(net.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     criterion = Maploss()
-    #criterion = torch.nn.MSELoss(reduce=True, size_average=True)
-    
 
 
     step_index = 0
 
-
     loss_time = 0
     loss_value = 0
     compare_loss = 1
-    for epoch in range(1000):
+    for epoch in range(args.start_epoch, 1000):
         train_time_st = time.time()
         loss_value = 0
-        if epoch % 50 == 0 and epoch != 0:
+        if epoch % 27 == 0 and epoch != 0:
             step_index += 1
             adjust_learning_rate(optimizer, args.gamma, step_index)
 
         st = time.time()
         for index, (real_images, real_gh_label, real_gah_label, real_mask, _) in enumerate(real_data_loader):
-            #real_images, real_gh_label, real_gah_label, real_mask = next(batch_real)
+
+            net.train()
+
             syn_images, syn_gh_label, syn_gah_label, syn_mask, __ = next(batch_syn)
             images = torch.cat((syn_images,real_images), 0)
             gh_label = torch.cat((syn_gh_label, real_gh_label), 0)
             gah_label = torch.cat((syn_gah_label, real_gah_label), 0)
             mask = torch.cat((syn_mask, real_mask), 0)
             #affinity_mask = torch.cat((syn_mask, real_affinity_mask), 0)
-
 
             images = Variable(images.type(torch.FloatTensor)).cuda()
             gh_label = gh_label.type(torch.FloatTensor)
@@ -193,20 +188,20 @@ if __name__ == '__main__':
             #     print('save the lower loss iter, loss:',loss)
             #     compare_loss = loss
             #     torch.save(net.module.state_dict(),
-            #                '/data/CRAFT-pytorch/real_weights/lower_loss.pth')
+            #                './epoch_weights/PRL/PRL' + '_epoch_' + repr(epoch) + '_batch_' + repr(index) + '.pth')
+
+            if index % 50 == 0:
+                print('saving the weights... (epoch %d, iter %d)' % (epoch, index))
+                torch.save(net.module.state_dict(),
+                           './epoch_weights/SciTSR/SciTSR' + '_epoch_' + repr(epoch) + '_batch_' + repr(index) + '.pth')
+
+            net.eval()
 
         print('Saving state, iter:', epoch)
         torch.save(net.module.state_dict(),
-                   '/data/CRAFT-pytorch/real_weights/CRAFT_clr_' + repr(epoch) + '.pth')
-        test('/data/CRAFT-pytorch/real_weights/CRAFT_clr_' + repr(epoch) + '.pth')
-        #test('/data/CRAFT-pytorch/craft_mlt_25k.pth')
-        getresult()
+                   './epoch_weights/SciTSR/SciTSR' + '_' + repr(epoch) + '.pth')
         
-
-
-
-
-
-
-
-
+        # 測試 model 的效能
+        # test('./data/CRAFT-pytorch/epoch_weights/mlt' + '_' + repr(epoch) + '.pth')
+        
+        # getresult()

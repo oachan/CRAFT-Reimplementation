@@ -20,6 +20,7 @@ import torchvision.transforms as transforms
 import craft_utils
 import Polygon as plg
 import time
+import csv
 
 
 def ratio_area(h, w, box):
@@ -76,12 +77,16 @@ def padding_image(image,imgsize):
     return img
 
 def random_crop(imgs, img_size, character_bboxes):
-    h, w = imgs[0].shape[0:2]
-    th, tw = img_size
+    '''
+    imgs : [image, region_scores, affinity_scores, confidence_mask]
+    '''
+    h, w = imgs[0].shape[0:2]   # 資料集圖片的長跟寬
+    th, tw = img_size           # 目標cropping的大小長跟寬
     crop_h, crop_w = img_size
     if w == tw and h == th:
         return imgs
 
+    # 統計所有字元的bounding box, 找出最大及最小的部分
     word_bboxes = []
     if len(character_bboxes) > 0:
         for bboxes in character_bboxes:
@@ -89,8 +94,14 @@ def random_crop(imgs, img_size, character_bboxes):
                 [[bboxes[:, :, 0].min(), bboxes[:, :, 1].min()], [bboxes[:, :, 0].max(), bboxes[:, :, 1].max()]])
     word_bboxes = np.array(word_bboxes, np.int32)
 
+    '''
+    利用character bounding box去合理選擇出可以crop的範圍, 避免crop到沒有字的部分
+    threshold設定為0.01, 較偏好這種方式
+    因為如SciTSR的資料集, 表格大多集中在圖片正中央, 而周圍則無任何資訊。
+    使用else下面的crop方法比較不佳, 在這樣的情況應該盡量避免, 可能導致loss為nan。
+    '''
     #### IC15 for 0.6, MLT for 0.35 #####
-    if random.random() > 0.6 and len(word_bboxes) > 0:
+    if random.random() > 0.01 and len(word_bboxes) > 0:
         sample_bboxes = word_bboxes[random.randint(0, len(word_bboxes) - 1)]
         left = max(sample_bboxes[1, 0] - img_size[0], 0)
         top = max(sample_bboxes[1, 1] - img_size[0], 0)
@@ -113,6 +124,9 @@ def random_crop(imgs, img_size, character_bboxes):
         i, j = 0, 0
         crop_h, crop_w = h + 1, w + 1  # make the crop_h, crop_w > tw, th
 
+    '''
+    把 region score, affinity_score, confidence_mask 一起同時做 cropping
+    '''
     for idx in range(len(imgs)):
         # crop_h = sample_bboxes[1, 1] if th < sample_bboxes[1, 1] else th
         # crop_w = sample_bboxes[1, 0] if tw < sample_bboxes[1, 0] else tw
@@ -260,7 +274,7 @@ class craft_base_dataset(data.Dataset):
                 ori = np.matmul(I, tmp.transpose(1, 0)).transpose(1, 0)
                 bboxes[j] = ori[:, :2]
         except Exception as e:
-            print(e, gt_path)
+            print(e)
 
 #         for j in range(len(bboxes)):
 #             ones = np.ones((4, 1))
@@ -558,7 +572,7 @@ class ICDAR2015(craft_base_dataset):
         :return:bboxes 字符的框，
         '''
         imagename = self.images_path[index]
-        gt_path = os.path.join(self.gt_folder, "gt_%s.txt" % os.path.splitext(imagename)[0])
+        gt_path = os.path.join(self.gt_folder, "%s.txt" % os.path.splitext(imagename)[0])
         word_bboxes, words = self.load_gt(gt_path)
         word_bboxes = np.float32(word_bboxes)
 
@@ -621,6 +635,132 @@ class ICDAR2015(craft_base_dataset):
             bboxes.append(np.array(new_box))
             words.append(word)
         return bboxes, words
+
+class PRL5fold(craft_base_dataset):
+    def __init__(self, net, PRL_folder, target_size=768, viz=False, debug=False):
+        super(PRL5fold, self).__init__(target_size, viz, debug)
+        self.net = net
+        self.net.eval()
+        self.img_folder = os.path.join(PRL_folder, 'img/')
+        self.gt_folder = os.path.join(PRL_folder, 'box/')
+        imagenames = os.listdir(self.img_folder)
+        self.images_path = []
+        for imagename in imagenames:
+            self.images_path.append(imagename)
+
+    def __getitem__(self, index):
+        return self.pull_item(index)
+
+    def __len__(self):
+        return len(self.images_path)
+
+    def get_imagename(self, index):
+        return self.images_path[index]
+
+    def load_image_gt_and_confidencemask(self, index):
+        '''
+        根据索引加载ground truth
+        :param index:索引
+        :return:bboxes 字符的框，
+        '''
+        imagename = self.images_path[index]
+        # print("%s.csv" % os.path.splitext(imagename)[0])
+        gt_path = os.path.join(self.gt_folder, "%s.csv" % os.path.splitext(imagename)[0])
+        word_bboxes, words = self.load_gt(gt_path)
+        word_bboxes = np.float32(word_bboxes)
+
+        image_path = os.path.join(self.img_folder, imagename)
+        image = cv2.imread(image_path)
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+
+        image = random_scale(image, word_bboxes, self.target_size)
+
+        confidence_mask = np.ones((image.shape[0], image.shape[1]), np.float32)
+
+        character_bboxes = []
+        new_words = []
+        confidences = []
+        if len(word_bboxes) > 0:
+            for i in range(len(word_bboxes)):
+                if words[i] == '###' or len(words[i].strip()) == 0:
+                    cv2.fillPoly(confidence_mask, [np.int32(word_bboxes[i])], (0))
+            for i in range(len(word_bboxes)):
+                if words[i] == '###' or len(words[i].strip()) == 0:
+                    continue
+                pursedo_bboxes, bbox_region_scores, confidence = self.inference_pursedo_bboxes(self.net, image,
+                                                                                               word_bboxes[i],
+                                                                                               words[i],
+                                                                                               viz=self.viz)
+                confidences.append(confidence)
+                cv2.fillPoly(confidence_mask, [np.int32(word_bboxes[i])], (confidence))
+                new_words.append(words[i])
+                character_bboxes.append(pursedo_bboxes)
+        return image, character_bboxes, new_words, confidence_mask, confidences
+
+    # 有做稍微的修改(因為原本的程式碼是使用readline, 並不支援SciTSR檔案的格式, 即text label會有換行字元)
+    def load_gt(self, gt_path):
+
+        # lines = open(gt_path, encoding='utf-8').readlines()
+        bboxes = []
+        words = []
+        with open(gt_path, encoding='utf-8') as f:
+            reader = csv.reader(f) 
+            for line in reader:
+                # ori_box = line.strip().encode('utf-8').decode('utf-8-sig').split(',')
+                ori_box = [i.strip('\ufeff').strip('\xef\xbb\xbf') for i in line]
+                box = [int(ori_box[j]) for j in range(8)]
+
+                ###################################
+                # 此段為新增的部分
+                if len(box) < 8:
+                    continue
+                x1, y1, x2, y2, x3, y3, x4, y4 = list(map(float, box))
+                text_polys = [[x1, y1], [x2, y2], [x3, y3], [x4, y4]]
+                p_area = self.polygon_area(text_polys)
+                if abs(p_area) < 1:
+                    continue
+                ####################################
+
+                word = ori_box[8:]
+                word = ','.join(word)
+                box = np.array(box, np.int32).reshape(4, 2)
+                if word == '###':
+                    words.append('###')
+                    bboxes.append(box)
+                    continue
+                area, p0, p3, p2, p1, _, _ = mep(box)
+
+                bbox = np.array([p0, p1, p2, p3])
+                distance = 10000000
+                index = 0
+                for i in range(4):
+                    d = np.linalg.norm(box[0] - bbox[i])
+                    if distance > d:
+                        index = i
+                        distance = d
+                new_box = []
+                for i in range(index, index + 4):
+                    new_box.append(bbox[i % 4])
+                new_box = np.array(new_box)
+                bboxes.append(np.array(new_box))
+                words.append(word)
+            return bboxes, words
+
+    # 參考自EAST裡面 icdar.py 的函式去計算 polygon 面積
+    def polygon_area(self, poly):
+        '''
+        compute area of a polygon
+        :param poly:
+        :return:
+        '''
+        edge = [
+            (poly[1][0] - poly[0][0]) * (poly[1][1] + poly[0][1]),
+            (poly[2][0] - poly[1][0]) * (poly[2][1] + poly[1][1]),
+            (poly[3][0] - poly[2][0]) * (poly[3][1] + poly[2][1]),
+            (poly[0][0] - poly[3][0]) * (poly[0][1] + poly[3][1])
+        ]
+        return np.sum(edge)/2.
+
 
 
 if __name__ == '__main__':
