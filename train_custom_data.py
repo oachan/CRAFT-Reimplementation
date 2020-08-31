@@ -18,8 +18,6 @@ import re
 
 from data_loader import ICDAR2015, Synth80k, ICDAR2013, PRL5fold
 
-from test import test
-
 from math import exp
 
 ###import file#######
@@ -201,7 +199,7 @@ if __name__ == '__main__':
                 print('saving the weights... (epoch %d, iter %d)' % (epoch, index))
                 torch.save(
                     net.module.state_dict(),
-                    os.path.join(args.output_model_dir, "model_epoch_{}_batch_.pth".format(epoch, index)
+                    os.path.join(args.output_model_dir, "model_epoch_{}_batch_.pth".format(epoch, index))
                 )
 
             net.eval()
@@ -209,10 +207,11 @@ if __name__ == '__main__':
         print('Saving state, iter:', epoch)
         torch.save(
             net.module.state_dict(),
-            os.path.join(args.output_model_dir, "model_{}.pth".format(epoch)
+            os.path.join(args.output_model_dir, "model_{}.pth".format(epoch))
         )
         
         # 測試 model 的效能
+        # from test import test
         # test('./data/CRAFT-pytorch/epoch_weights/mlt' + '_' + repr(epoch) + '.pth')
         
         # getresult()
